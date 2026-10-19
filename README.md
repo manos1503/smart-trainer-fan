@@ -47,6 +47,15 @@ python ble_probe.py
 Wear the strap and pedal for a few seconds so both devices advertise. Run it once with Zwift
 closed and once with Zwift connected.
 
+To record a ride for offline analysis (one row per second), add `--csv`:
+
+```bash
+python ble_probe.py --csv recordings/2026-10-20-endurance.csv
+```
+
+Columns: `timestamp, elapsed_s, power_w, power_3s_w, hr_bpm`. The `recordings/` folder is
+git-ignored.
+
 ### Firmware
 
 Install the [PlatformIO](https://platformio.org/install/ide?install=vscode) extension in VS Code, then:

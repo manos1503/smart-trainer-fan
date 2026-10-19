@@ -16,6 +16,9 @@ __pycache__/
 venv/
 .ruff_cache/
 
+# Personal ride recordings (heart rate is personal data; commit only on purpose)
+tools/recordings/
+
 # Secrets (Wi-Fi credentials etc.)
 firmware/include/secrets.h
 .env
