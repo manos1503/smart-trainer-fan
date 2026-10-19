@@ -11,6 +11,7 @@ Usage (from tools/):
     pip install -r requirements.txt
     python ble_probe.py                      # live view only
     python ble_probe.py --csv recordings/ride.csv   # live view + 1 Hz recording
+    python ble_probe.py --debug              # also print raw heart-rate packets
 """
 
 import argparse
@@ -24,6 +25,8 @@ from datetime import datetime
 from pathlib import Path
 
 from bleak import BleakClient, BleakScanner
+
+from hr_contact import ContactDetector, parse_hr_measurement
 
 # Standard Bluetooth SIG UUIDs
 CPS_SERVICE = "00001818-0000-1000-8000-00805f9b34fb"  # Cycling Power Service
@@ -40,6 +43,9 @@ CSV_HEADER = ["timestamp", "elapsed_s", "power_w", "power_3s_w", "hr_bpm"]
 power_samples: deque[tuple[float, int]] = deque()
 latest_power: tuple[float, int] | None = None  # (monotonic time, watts)
 latest_hr: tuple[float, int] | None = None  # (monotonic time, bpm)
+hr_contact = ContactDetector()
+hr_in_contact: bool | None = None  # last reported state, to print only on changes
+debug = False  # --debug: print every raw heart-rate packet
 stop = asyncio.Event()  # set on Ctrl+C so every task can finish cleanly
 
 
@@ -53,11 +59,20 @@ def on_power(_sender, data: bytearray) -> None:
 
 
 def on_hr(_sender, data: bytearray) -> None:
-    # Layout: uint8 flags; bit0 = 0 -> HR is uint8, 1 -> HR is uint16 (LE)
-    global latest_hr
-    flags = data[0]
-    bpm = struct.unpack_from("<H", data, 1)[0] if flags & 0x01 else data[1]
-    latest_hr = (time.monotonic(), bpm)
+    global latest_hr, hr_in_contact
+    packet = parse_hr_measurement(bytes(data))
+    in_contact = hr_contact.update(packet)
+    if debug:
+        rr = ", ".join(f"{ms:.0f}" for ms in packet.rr_ms) or "-"
+        verdict = "contact" if in_contact else "NO CONTACT"
+        print(f"  HR raw: {data.hex(' ')} | bpm={packet.bpm} rr_ms=[{rr}] -> {verdict}")
+
+    if in_contact != hr_in_contact:
+        if hr_in_contact is not None:
+            print("[OK] HR strap: on the body" if in_contact else "[!!] HR strap: not on the body")
+        hr_in_contact = in_contact
+    # Off the body the strap keeps sending a stale or made-up value, so drop it right away.
+    latest_hr = (time.monotonic(), packet.bpm) if in_contact else None
 
 
 def fresh(sample: tuple[float, int] | None) -> int | None:
@@ -171,6 +186,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--csv", type=Path, metavar="FILE", help="also record one row per second to FILE"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="print every raw heart-rate packet with RR intervals and contact verdict",
+    )
     return parser.parse_args()
 
 
@@ -202,4 +222,6 @@ async def main(csv_path: Path | None) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(parse_args().csv))
+    args = parse_args()
+    debug = args.debug
+    asyncio.run(main(args.csv))
