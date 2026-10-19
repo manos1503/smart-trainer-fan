@@ -70,6 +70,16 @@ Squash merges done on GitHub are signed by GitHub itself.
 - Python (`tools/`): formatted and linted with `ruff` (`ruff format`, `ruff check`).
 - C++ (`firmware/`): `.clang-format` at the repo root; run "Format Document" in VS Code.
 
+## Tests
+
+```bash
+cd tools
+pip install -r requirements-dev.txt
+pytest
+```
+
+Real sensor recordings used as test data live in `tools/tests/data/`.
+
 ## Releases
 
 Semantic versioning. Tag milestones from `main`, e.g. `git tag -s v0.1.0 -m "BLE reading works"`,
