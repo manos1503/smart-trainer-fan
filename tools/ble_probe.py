@@ -32,12 +32,14 @@ HR_SERVICE = "0000180d-0000-1000-8000-00805f9b34fb"  # Heart Rate Service
 HR_MEASUREMENT = "00002a37-0000-1000-8000-00805f9b34fb"  # Heart Rate Measurement
 
 POWER_WINDOW_S = 3.0  # rolling average window, like "3s power"
+STALE_S = 3.0  # a value older than this is treated as missing (sensors send >= 1 per second)
+SCAN_SLICE_S = 2.0  # rescan in short slices so Ctrl+C is never delayed by more than this
 
 CSV_HEADER = ["timestamp", "elapsed_s", "power_w", "power_3s_w", "hr_bpm"]
 
 power_samples: deque[tuple[float, int]] = deque()
-latest_power: int | None = None
-latest_hr: int | None = None
+latest_power: tuple[float, int] | None = None  # (monotonic time, watts)
+latest_hr: tuple[float, int] | None = None  # (monotonic time, bpm)
 stop = asyncio.Event()  # set on Ctrl+C so every task can finish cleanly
 
 
@@ -45,38 +47,77 @@ def on_power(_sender, data: bytearray) -> None:
     # Layout: uint16 flags (LE), sint16 instantaneous power in watts (LE), optional fields after
     global latest_power
     _flags, watts = struct.unpack_from("<Hh", data, 0)
-    latest_power = watts
     now = time.monotonic()
+    latest_power = (now, watts)
     power_samples.append((now, watts))
-    while power_samples and now - power_samples[0][0] > POWER_WINDOW_S:
-        power_samples.popleft()
 
 
 def on_hr(_sender, data: bytearray) -> None:
     # Layout: uint8 flags; bit0 = 0 -> HR is uint8, 1 -> HR is uint16 (LE)
     global latest_hr
     flags = data[0]
-    latest_hr = struct.unpack_from("<H", data, 1)[0] if flags & 0x01 else data[1]
+    bpm = struct.unpack_from("<H", data, 1)[0] if flags & 0x01 else data[1]
+    latest_hr = (time.monotonic(), bpm)
+
+
+def fresh(sample: tuple[float, int] | None) -> int | None:
+    """Return the value only if it arrived recently, so a lost sensor shows as missing."""
+    if sample is None or time.monotonic() - sample[0] > STALE_S:
+        return None
+    return sample[1]
 
 
 def avg_power() -> float | None:
+    now = time.monotonic()
+    while power_samples and now - power_samples[0][0] > POWER_WINDOW_S:
+        power_samples.popleft()
     if not power_samples:
         return None
     return sum(w for _, w in power_samples) / len(power_samples)
 
 
-async def stream(device, char_uuid: str, handler, label: str) -> None:
+async def wait_or_stop(seconds: float) -> None:
+    """Sleep, but wake up immediately on Ctrl+C."""
     try:
-        async with BleakClient(device) as client:
-            await client.start_notify(char_uuid, handler)
-            print(f"[OK] Connected to {label}: {device.name}")
-            while client.is_connected and not stop.is_set():
-                await asyncio.sleep(0.2)
-            if not stop.is_set():
-                print(f"[!!] {label} disconnected")
-        # leaving the "async with" block disconnects cleanly
-    except Exception as exc:  # keep the other sensor running if one fails
-        print(f"[!!] {label} error: {exc}")
+        await asyncio.wait_for(stop.wait(), timeout=seconds)
+    except TimeoutError:
+        pass
+
+
+async def stream(device, char_uuid: str, handler, label: str) -> None:
+    """Keep one sensor connected for the whole session, reconnecting when the link drops.
+
+    After a drop we scan continuously for the sensor's address and connect the moment it
+    advertises again, instead of waiting between attempts.
+    """
+    target = device  # first connection: the device found by the initial scan
+    connected_before = False
+    while not stop.is_set():
+        try:
+            if target is None:
+                # Returns as soon as the sensor is seen, or None after one scan slice.
+                target = await BleakScanner.find_device_by_address(
+                    device.address, timeout=SCAN_SLICE_S
+                )
+                if target is None:
+                    continue  # not advertising yet: keep scanning
+            async with BleakClient(target, timeout=10.0) as client:
+                await client.start_notify(char_uuid, handler)
+                verb = "Reconnected" if connected_before else "Connected"
+                print(f"[OK] {verb} to {label}: {device.name}")
+                connected_before = True
+                while client.is_connected and not stop.is_set():
+                    await asyncio.sleep(0.2)
+            # leaving the "async with" block disconnects cleanly
+            if stop.is_set():
+                break
+            print(f"[!!] {label} disconnected, searching...")
+        except Exception as exc:  # keep the other sensor running if one fails
+            if stop.is_set():
+                break
+            print(f"[!!] {label} connection failed ({str(exc) or type(exc).__name__}), retrying...")
+            await wait_or_stop(0.5)  # brief pause so a failing sensor cannot spin the loop
+        target = None
 
 
 def open_recording(path: Path):
@@ -101,17 +142,20 @@ async def printer(csv_path: Path | None) -> None:
             if stop.is_set():
                 break
             p = avg_power()
+            power_now = fresh(latest_power)
+            hr = fresh(latest_hr)
             p_txt = f"{p:4.0f} W" if p is not None else "  -- W"
-            hr_txt = f"{latest_hr:3d} bpm" if latest_hr is not None else " -- bpm"
+            hr_txt = f"{hr:3d} bpm" if hr is not None else " -- bpm"
             print(f"power(3s): {p_txt} | HR: {hr_txt}")
             if writer:
+                # Missing values are written as empty cells, so gaps stay visible in the data.
                 writer.writerow(
                     [
                         datetime.now().isoformat(timespec="seconds"),
                         round(time.monotonic() - start, 1),
-                        "" if latest_power is None else latest_power,
+                        "" if power_now is None else power_now,
                         "" if p is None else round(p),
-                        "" if latest_hr is None else latest_hr,
+                        "" if hr is None else hr,
                     ]
                 )
                 f.flush()  # keep the file usable even if the program is killed

@@ -20,6 +20,10 @@ Zwift keeps its own BLE connections. The ESP32 uses one of the spare slots on ea
    (sprints, a single hard pedal stroke) do not make the fan jump up and down.
 4. **Output:** send the IR code for the target speed only when it changes.
 5. **Override:** manual speed from the web UI; auto-off after N seconds of zero power.
+6. **Sensor loss:** a reading older than 3 s counts as missing (never reuse a stale value).
+   After a drop, scan continuously for the sensor's address and reconnect as soon as it
+   advertises. With power missing, fall back to heart rate; with both missing, hold the
+   current speed, then turn off.
 
 ## BLE payloads
 
