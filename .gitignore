@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# PlatformIO
+.pio/
+firmware/.vscode/
+
+# VS Code (keep shared recommendations only)
+.vscode/*
+!.vscode/extensions.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+
+# Secrets (Wi-Fi credentials etc.)
+firmware/include/secrets.h
+.env

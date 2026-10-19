@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "platformio.platformio-ide",
+    "ms-python.python",
+    "charliermarsh.ruff",
+    "editorconfig.editorconfig"
+  ]
+}
