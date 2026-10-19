@@ -13,6 +13,7 @@ Usage (from tools/):
 """
 
 import asyncio
+import signal
 import struct
 import time
 from collections import deque
@@ -29,6 +30,7 @@ POWER_WINDOW_S = 3.0  # rolling average window, like "3s power"
 
 power_samples: deque[tuple[float, int]] = deque()
 latest_hr: int | None = None
+stop = asyncio.Event()  # set on Ctrl+C so every task can finish cleanly
 
 
 def on_power(_sender, data: bytearray) -> None:
@@ -58,16 +60,20 @@ async def stream(device, char_uuid: str, handler, label: str) -> None:
         async with BleakClient(device) as client:
             await client.start_notify(char_uuid, handler)
             print(f"[OK] Connected to {label}: {device.name}")
-            while client.is_connected:
-                await asyncio.sleep(1)
-            print(f"[!!] {label} disconnected")
+            while client.is_connected and not stop.is_set():
+                await asyncio.sleep(0.2)
+            if not stop.is_set():
+                print(f"[!!] {label} disconnected")
+        # leaving the "async with" block disconnects cleanly
     except Exception as exc:  # keep the other sensor running if one fails
         print(f"[!!] {label} error: {exc}")
 
 
 async def printer() -> None:
-    while True:
+    while not stop.is_set():
         await asyncio.sleep(1)
+        if stop.is_set():
+            break
         p = avg_power()
         p_txt = f"{p:4.0f} W" if p is not None else "  -- W"
         hr_txt = f"{latest_hr:3d} bpm" if latest_hr is not None else " -- bpm"
@@ -75,6 +81,7 @@ async def printer() -> None:
 
 
 async def main() -> None:
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, stop.set)
     print("Scanning for 8 s (pedal a bit so the KICKR wakes up, wear the HR strap)...")
     found = await BleakScanner.discover(timeout=8.0, return_adv=True)
 
@@ -97,10 +104,8 @@ async def main() -> None:
     if hrm:
         tasks.append(asyncio.create_task(stream(hrm, HR_MEASUREMENT, on_hr, "HR strap")))
     await asyncio.gather(*tasks)
+    print("\nStopped.")
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nStopped.")
+    asyncio.run(main())
